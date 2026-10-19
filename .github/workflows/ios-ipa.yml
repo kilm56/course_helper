@@ -99,7 +99,7 @@ jobs:
                 config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= [
                   '$(inherited)',
                   'PERMISSION_LOCATION=1',
-                  'PERMISSION_LOCATION_WHENINUSE=1',
+                  'PERMISSION_LOCATION_WHENINUSE=0',
                   'PERMISSION_CAMERA=1',
                   'PERMISSION_PHOTOS=1',
                   'PERMISSION_MICROPHONE=1',
@@ -250,6 +250,12 @@ jobs:
           echo "--- 定位错误码补丁 ---"
           grep -n "错误码" lib/pages/widget/baidu_map.dart || true
 
+      # 补丁如果写坏了 Dart，这里 30 秒内就能报出来，不用等整包编译
+      - name: Analyze patched Dart
+        run: |
+          flutter analyze --no-fatal-infos --no-fatal-warnings \
+            lib/main.dart lib/pages/widget/baidu_map.dart
+
       - name: Normalize Xcode deployment target
         working-directory: ios
         run: |
@@ -259,11 +265,31 @@ jobs:
 
       # 生成 ios/Flutter/Generated.xcconfig（Podfile 的 flutter_root 依赖它）
       - name: Generate Xcode config
-        run: flutter build ios --config-only --release --no-codesign
+        run: |
+          set -o pipefail
+          flutter build ios --config-only --release --no-codesign 2>&1 | tee ios/xcode_config.log
 
       - name: pod install
         working-directory: ios
-        run: pod install --repo-update
+        run: |
+          set -o pipefail
+          ok=0
+          for i in 1 2 3; do
+            if pod install 2>&1 | tee pod_install.log; then
+              ok=1
+              break
+            fi
+            echo "::warning::pod install 第 ${i} 次失败，清理缓存后重试"
+            rm -rf "$HOME/Library/Caches/CocoaPods"
+            sleep 5
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::pod install 连续 3 次失败，请查看 ios-build-failure-info 里的 pod_install.log"
+            exit 1
+          fi
+          test -f Podfile.lock || { echo "::error::未生成 Podfile.lock"; exit 1; }
+          echo "--- 权限宏是否真的写进 Pods ---"
+          grep -rl "PERMISSION_LOCATION=1" Pods 2>/dev/null | head -5 || echo "::warning::Pods 中未找到权限宏"
 
       - name: Build iOS release (no codesign)
         run: flutter build ios --release --no-codesign
@@ -307,5 +333,7 @@ jobs:
             ios/Podfile.lock
             ios/Flutter/Debug.xcconfig
             ios/Flutter/Release.xcconfig
+            ios/pod_install.log
+            ios/xcode_config.log
           if-no-files-found: ignore
           retention-days: 7
