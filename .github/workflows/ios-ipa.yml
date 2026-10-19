@@ -3,8 +3,10 @@ name: Build unsigned iOS IPA
 # 用途：在本仓库的 macOS runner 上编译 course_helper 的 iOS 版，
 # 产出未签名 .ipa（Payload/Runner.app），供 Sideloadly / AltStore 在 Windows 上签名安装。
 #
-# 用法：Fork 仓库 -> 新建 .github/workflows/ios-ipa.yml（内容为本文件）
-#       -> Actions -> "Build unsigned iOS IPA" -> Run workflow
+# 上游 ios/ 目录是没维护过的老模板，本工作流会先修三处硬伤再编译：
+#   1) Podfile 调用了不存在的 parse_KV_file -> 整体重写成标准模板
+#   2) Flutter/Debug.xcconfig、Release.xcconfig 没引入 Pods xcconfig -> 补上
+#   3) Info.plist 缺少相机/相册/定位/麦克风权限描述 -> 补上（否则装上后一用就闪退）
 
 on:
   workflow_dispatch:
@@ -12,6 +14,10 @@ on:
     branches: [master]
     paths:
       - ".github/workflows/ios-ipa.yml"
+
+env:
+  # 需要兼容更低系统就把这里改成 13.0
+  IOS_DEPLOYMENT_TARGET: "15.0"
 
 jobs:
   build-ipa:
@@ -41,21 +47,112 @@ jobs:
       - name: flutter pub get
         run: flutter pub get
 
-      # 常见拦路虎：Podfile 的 platform 是模板默认值（12.0 且被注释），
-      # 而 camera / mobile_scanner / photo_manager 等插件要求更高版本。
-      # 这里统一抬到 15.0，保证 pod install 不因兼容性中断。
-      - name: Normalize iOS deployment target
+      # 修复 1：上游 Podfile 的 flutter_root 调用了未定义的 parse_KV_file
+      # （大写 KV），任何 pod install 都会直接报错。
+      - name: Repair stale Podfile
+        working-directory: ios
+        run: |
+          cat > Podfile <<'PODFILE'
+          # Rewritten by CI: upstream Podfile called an undefined parse_KV_file helper.
+          platform :ios, ENV['IOS_DEPLOYMENT_TARGET'] || '15.0'
+
+          ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+
+          project 'Runner', {
+            'Debug' => :debug,
+            'Profile' => :release,
+            'Release' => :release,
+          }
+
+          def flutter_root
+            generated_xcode_build_settings_path = File.expand_path(File.join('..', 'Flutter', 'Generated.xcconfig'), __FILE__)
+            unless File.exist?(generated_xcode_build_settings_path)
+              raise "#{generated_xcode_build_settings_path} must exist. If you're running pod install manually, make sure flutter pub get is executed first"
+            end
+
+            File.foreach(generated_xcode_build_settings_path) do |line|
+              matches = line.match(/FLUTTER_ROOT\=(.*)/)
+              return matches[1].strip if matches
+            end
+            raise "FLUTTER_ROOT not found in #{generated_xcode_build_settings_path}. Try deleting Generated.xcconfig, then run flutter pub get"
+          end
+
+          require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper'), flutter_root)
+
+          flutter_ios_podfile_setup
+
+          target 'Runner' do
+            use_frameworks!
+            use_modular_headers!
+
+            flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+          end
+
+          post_install do |installer|
+            installer.pods_project.targets.each do |target|
+              flutter_additional_ios_build_settings(target)
+            end
+          end
+          PODFILE
+          echo "--- 语法检查 ---"
+          ruby -c Podfile
+          echo "--- 生成结果 ---"
+          cat Podfile
+
+      # 修复 2：上游 Debug/Release.xcconfig 只有 #include "Generated.xcconfig"，
+      # 没有引入 Pods 的 xcconfig，链接阶段会找不到插件框架。
+      - name: Patch Flutter xcconfigs
+        working-directory: ios/Flutter
+        run: |
+          set -euo pipefail
+          add_include () {
+            file="$1"
+            cfg="$2"
+            needle="Pods-Runner.${cfg}.xcconfig"
+            if grep -qF "$needle" "$file"; then
+              echo "已包含 $needle ($file)"
+            else
+              printf '#include? "Pods/Target Support Files/Pods-Runner/%s"\n' "$needle" | cat - "$file" > "$file.tmp"
+              mv "$file.tmp" "$file"
+              echo "已补上 $needle ($file)"
+            fi
+          }
+          add_include Debug.xcconfig debug
+          add_include Release.xcconfig release
+          echo "--- Debug.xcconfig ---"; cat Debug.xcconfig
+          echo "--- Release.xcconfig ---"; cat Release.xcconfig
+
+      # 修复 3：补权限描述，避免运行到相机/相册/定位时直接崩溃
+      - name: Patch Info.plist permissions
+        run: |
+          set -euo pipefail
+          PLIST="ios/Runner/Info.plist"
+          if [ ! -x /usr/libexec/PlistBuddy ]; then
+            echo "PlistBuddy 不可用，跳过"; exit 0
+          fi
+          set_plist () {
+            key="$1"; val="$2"
+            /usr/libexec/PlistBuddy -c "Set :$key $val" "$PLIST" 2>/dev/null \
+              || /usr/libexec/PlistBuddy -c "Add :$key string $val" "$PLIST"
+          }
+          set_plist NSCameraUsageDescription "扫码与拍照签到需要相机权限"
+          set_plist NSPhotoLibraryUsageDescription "上传图片与课件需要相册权限"
+          set_plist NSPhotoLibraryAddUsageDescription "保存课件图片需要相册写入权限"
+          set_plist NSMicrophoneUsageDescription "在线课堂语音互动需要麦克风权限"
+          set_plist NSLocationWhenInUseUsageDescription "位置签到需要定位权限"
+          echo "--- 权限相关键 ---"
+          /usr/libexec/PlistBuddy -c "Print" "$PLIST" | grep -E "UsageDescription" || true
+
+      - name: Normalize Xcode deployment target
         working-directory: ios
         run: |
           set -euo pipefail
-          if grep -qE "^[[:space:]]*#?[[:space:]]*platform :ios" Podfile; then
-            sed -i '' -E "s/^[[:space:]]*#?[[:space:]]*platform :ios.*/platform :ios, '15.0'/" Podfile
-          else
-            printf "\nplatform :ios, '15.0'\n" >> Podfile
-          fi
-          grep -n "platform :ios" Podfile
-          sed -i '' -E "s/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]+;/IPHONEOS_DEPLOYMENT_TARGET = 15.0;/g" Runner.xcodeproj/project.pbxproj
-          echo "deployment target 已更新为 15.0"
+          sed -i '' -E "s/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]+;/IPHONEOS_DEPLOYMENT_TARGET = ${IOS_DEPLOYMENT_TARGET};/g" Runner.xcodeproj/project.pbxproj
+          echo "命中行数: $(grep -c "IPHONEOS_DEPLOYMENT_TARGET = ${IOS_DEPLOYMENT_TARGET}" Runner.xcodeproj/project.pbxproj || true)"
+
+      # 生成 ios/Flutter/Generated.xcconfig（Podfile 的 flutter_root 依赖它）
+      - name: Generate Xcode config
+        run: flutter build ios --config-only --release --no-codesign
 
       - name: pod install
         working-directory: ios
@@ -93,7 +190,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload build log on failure
+      - name: Upload failure info
         if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -101,5 +198,7 @@ jobs:
           path: |
             ios/Podfile
             ios/Podfile.lock
+            ios/Flutter/Debug.xcconfig
+            ios/Flutter/Release.xcconfig
           if-no-files-found: ignore
           retention-days: 7
