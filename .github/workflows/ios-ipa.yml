@@ -143,6 +143,81 @@ jobs:
           echo "--- 权限相关键 ---"
           /usr/libexec/PlistBuddy -c "Print" "$PLIST" | grep -E "UsageDescription" || true
 
+      # 百度 AK 是按 Bundle ID 绑定的，必须与百度控制台申请时填写的完全一致，
+      # 否则 iOS SDK 鉴权会失败（地图空白/定位无回调）。
+      - name: Set bundle identifier
+        env:
+          BUNDLE_ID: ${{ vars.IOS_BUNDLE_ID || 'com.kilm.coursehelper' }}
+        run: |
+          set -euo pipefail
+          OLD="com.example.chaoxingSignin"
+          sed -i '' "s/${OLD}/${BUNDLE_ID}/g" ios/Runner.xcodeproj/project.pbxproj
+          echo "目标 Bundle ID: ${BUNDLE_ID}"
+          grep "PRODUCT_BUNDLE_IDENTIFIER" ios/Runner.xcodeproj/project.pbxproj | sort -u
+          if ! grep -qE "PRODUCT_BUNDLE_IDENTIFIER = \"?${BUNDLE_ID}" ios/Runner.xcodeproj/project.pbxproj; then
+            echo "::error::Bundle ID 替换失败，上游工程里的值可能已变化"
+            exit 1
+          fi
+
+      # 上游 Dart 代码从未调用百度 SDK 的鉴权方法：
+      #   地图走 flutter_bmfbase/sdk/setApiKey，定位走 flutter_bmflocation/setAK
+      # Android 靠 Manifest 的 com.baidu.lbsapi.API_KEY 自动鉴权，iOS 没有该机制，
+      # 所以必须在应用启动时显式调用。仅在 iOS 分支生效，不影响 Android 行为。
+      - name: Patch Dart for iOS Baidu auth
+        env:
+          BAIDU_IOS_AK: ${{ secrets.BAIDU_IOS_AK }}
+        run: |
+          cat > /tmp/patch_baidu.py <<'PYFILE'
+          import os, pathlib, sys
+
+          ak = os.environ.get("BAIDU_IOS_AK", "").strip()
+          if not ak:
+              print("::error::缺少仓库 Secret: BAIDU_IOS_AK")
+              sys.exit(1)
+
+          p = pathlib.Path("lib/main.dart")
+          src = p.read_text(encoding="utf-8")
+
+          if "BAIDU_IOS_AK_INIT" in src:
+              print("main.dart 已打过补丁，跳过")
+              sys.exit(0)
+
+          src = src.replace(
+              "import 'package:flutter/material.dart';",
+              "import 'dart:io' show Platform;\nimport 'package:flutter/material.dart';",
+              1,
+          )
+
+          anchor = "import 'push/update.dart';"
+          extra = (
+              "\nimport 'package:flutter_baidu_mapapi_base/flutter_baidu_mapapi_base.dart';"
+              "\nimport 'package:flutter_bmflocation/flutter_bmflocation.dart';"
+          )
+          src = src.replace(anchor, anchor + extra, 1)
+
+          marker = "  WidgetsFlutterBinding.ensureInitialized();"
+          if marker not in src:
+              print("::error::main.dart 中找不到 ensureInitialized 锚点")
+              sys.exit(1)
+
+          lines = [
+              "",
+              "  // BAIDU_IOS_AK_INIT: iOS 必须显式鉴权，Android 由 Manifest meta-data 自动完成",
+              "  if (Platform.isIOS) {",
+              "    BMFMapSDK.setAgreePrivacy(true);",
+              "    BMFMapSDK.setApiKeyAndCoordType('__AK__', BMF_COORD_TYPE.BD09LL);",
+              "    LocationFlutterPlugin.setApiKey('__AK__');",
+              "  }",
+          ]
+          block = marker + "\n" + "\n".join(lines).replace("__AK__", ak)
+          src = src.replace(marker, block, 1)
+          p.write_text(src, encoding="utf-8")
+          print("已注入百度 iOS 鉴权，AK 前缀: %s****" % ak[:4])
+          PYFILE
+          python3 /tmp/patch_baidu.py
+          echo "--- main.dart 前 45 行 ---"
+          sed -n '1,45p' lib/main.dart
+
       - name: Normalize Xcode deployment target
         working-directory: ios
         run: |
