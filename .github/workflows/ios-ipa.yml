@@ -265,6 +265,17 @@ jobs:
                   print("baidu_map.dart: 失败提示已改为 errorCode / errorInfo")
                   break
 
+          # --- 3) 图钉过大 & 吞掉地图点击 ---
+          # placeholder.png 为 512x512，原 scale 0.3 约 154pt，约占屏宽 1/3；
+          # 且 BMFMarker 默认 enabled=true 会响应触摸，把“点空白地图选点”的
+          # 触摸区挡住，导致必须先点远处把图钉挪开才能选近处。
+          if "scaleX: 0.3," in src2:
+              src2 = src2.replace("scaleX: 0.3,", "scaleX: 0.08,", 1)
+              src2 = src2.replace("scaleY: 0.3", "scaleY: 0.08, enabled: false", 1)
+              print("baidu_map.dart: 图钉缩到 0.08 并禁用触摸")
+          else:
+              print("::warning::baidu_map.dart 未找到图钉 scale 设置")
+
           q.write_text(src2, encoding="utf-8")
           PYFILE
           python3 /tmp/patch_baidu.py
