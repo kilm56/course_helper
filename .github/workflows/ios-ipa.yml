@@ -1,0 +1,105 @@
+name: Build unsigned iOS IPA
+
+# 用途：在本仓库的 macOS runner 上编译 course_helper 的 iOS 版，
+# 产出未签名 .ipa（Payload/Runner.app），供 Sideloadly / AltStore 在 Windows 上签名安装。
+#
+# 用法：Fork 仓库 -> 新建 .github/workflows/ios-ipa.yml（内容为本文件）
+#       -> Actions -> "Build unsigned iOS IPA" -> Run workflow
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/ios-ipa.yml"
+
+jobs:
+  build-ipa:
+    name: flutter build ios (no codesign)
+    runs-on: macos-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 仓库 pubspec 要求 flutter ^3.41.8 / dart ^3.11.5
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.41.8"
+          channel: stable
+          cache: true
+
+      - name: Toolchain versions
+        run: |
+          flutter --version
+          dart --version
+          xcodebuild -version
+          pod --version || true
+
+      - name: flutter pub get
+        run: flutter pub get
+
+      # 常见拦路虎：Podfile 的 platform 是模板默认值（12.0 且被注释），
+      # 而 camera / mobile_scanner / photo_manager 等插件要求更高版本。
+      # 这里统一抬到 15.0，保证 pod install 不因兼容性中断。
+      - name: Normalize iOS deployment target
+        working-directory: ios
+        run: |
+          set -euo pipefail
+          if grep -qE "^[[:space:]]*#?[[:space:]]*platform :ios" Podfile; then
+            sed -i '' -E "s/^[[:space:]]*#?[[:space:]]*platform :ios.*/platform :ios, '15.0'/" Podfile
+          else
+            printf "\nplatform :ios, '15.0'\n" >> Podfile
+          fi
+          grep -n "platform :ios" Podfile
+          sed -i '' -E "s/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]+;/IPHONEOS_DEPLOYMENT_TARGET = 15.0;/g" Runner.xcodeproj/project.pbxproj
+          echo "deployment target 已更新为 15.0"
+
+      - name: pod install
+        working-directory: ios
+        run: pod install --repo-update
+
+      - name: Build iOS release (no codesign)
+        run: flutter build ios --release --no-codesign
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          APP="build/ios/iphoneos/Runner.app"
+          if [ ! -d "$APP" ]; then
+            echo "::error::未找到 $APP，请检查上面的构建日志"
+            exit 1
+          fi
+          rm -rf Payload
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry CourseHelper-unsigned.ipa Payload
+          ls -lh CourseHelper-unsigned.ipa
+
+          echo "--- 关键校验 ---"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP/Info.plist" || true
+          test -f "Payload/Runner.app/Frameworks/App.framework/App" && echo "OK: AOT snapshot 存在"
+          unzip -l CourseHelper-unsigned.ipa | head -20
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CourseHelper-unsigned-ipa
+          path: CourseHelper-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-failure-info
+          path: |
+            ios/Podfile
+            ios/Podfile.lock
+          if-no-files-found: ignore
+          retention-days: 7
