@@ -232,10 +232,23 @@ jobs:
           src = src.replace(marker, block, 1)
           p.write_text(src, encoding="utf-8")
           print("已注入百度 iOS 鉴权，AK 前缀: %s****" % ak[:4])
+
+          # --- 2) baidu_map.dart：把定位失败时的 locType 错误码显示出来 ---
+          q = pathlib.Path("lib/pages/widget/baidu_map.dart")
+          src2 = q.read_text(encoding="utf-8")
+          old = "_locationInfo = '定位失败，请重试';"
+          new = "_locationInfo = '定位失败(错误码 ${result.locType})，请重试';"
+          if old in src2:
+              q.write_text(src2.replace(old, new, 1), encoding="utf-8")
+              print("baidu_map.dart: 已改为显示 locType 错误码")
+          else:
+              print("::warning::baidu_map.dart 中没找到目标字符串，跳过")
           PYFILE
           python3 /tmp/patch_baidu.py
           echo "--- main.dart 前 45 行 ---"
           sed -n '1,45p' lib/main.dart
+          echo "--- 定位错误码补丁 ---"
+          grep -n "错误码" lib/pages/widget/baidu_map.dart || true
 
       - name: Normalize Xcode deployment target
         working-directory: ios
