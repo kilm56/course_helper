@@ -91,6 +91,21 @@ jobs:
           post_install do |installer|
             installer.pods_project.targets.each do |target|
               flutter_additional_ios_build_settings(target)
+
+              # permission_handler 在 iOS 上用宏控制权限是否参与编译，默认全部排除。
+              # 不在这里声明，Permission.location.request() 不会弹系统权限框、
+              # 也不会在“设置-隐私-定位服务”里出现条目，百度定位永远拿不到坐标。
+              target.build_configurations.each do |config|
+                config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= [
+                  '$(inherited)',
+                  'PERMISSION_LOCATION=1',
+                  'PERMISSION_LOCATION_WHENINUSE=1',
+                  'PERMISSION_CAMERA=1',
+                  'PERMISSION_PHOTOS=1',
+                  'PERMISSION_MICROPHONE=1',
+                  'PERMISSION_NOTIFICATIONS=1',
+                ]
+              end
             end
           end
           PODFILE
@@ -206,7 +221,11 @@ jobs:
               "  if (Platform.isIOS) {",
               "    BMFMapSDK.setAgreePrivacy(true);",
               "    BMFMapSDK.setApiKeyAndCoordType('__AK__', BMF_COORD_TYPE.BD09LL);",
-              "    LocationFlutterPlugin.setApiKey('__AK__');",
+              "    // 定位 SDK 是独立鉴权：隐私协议 + AK 都要单独过一遍",
+              "    final bmfLocation = LocationFlutterPlugin();",
+              "    await bmfLocation.setAgreePrivacy(true);",
+              "    await bmfLocation.authAK('__AK__');",
+              "    await LocationFlutterPlugin.setApiKey('__AK__');",
               "  }",
           ]
           block = marker + "\n" + "\n".join(lines).replace("__AK__", ak)
