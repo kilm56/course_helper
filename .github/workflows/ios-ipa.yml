@@ -233,16 +233,39 @@ jobs:
           p.write_text(src, encoding="utf-8")
           print("已注入百度 iOS 鉴权，AK 前缀: %s****" % ak[:4])
 
-          # --- 2) baidu_map.dart：把定位失败时的 locType 错误码显示出来 ---
+          # --- 2) baidu_map.dart：修正 iOS 定位判定逻辑 ---
+          # 官方文档：locType「仅Android端返回」，iOS 上恒为 null。
+          # 上游用 locType>0 判定成功，导致 iOS 永远走失败分支。
           q = pathlib.Path("lib/pages/widget/baidu_map.dart")
           src2 = q.read_text(encoding="utf-8")
-          old = "_locationInfo = '定位失败，请重试';"
-          new = "_locationInfo = '定位失败(错误码 ${result.locType})，请重试';"
-          if old in src2:
-              q.write_text(src2.replace(old, new, 1), encoding="utf-8")
-              print("baidu_map.dart: 已改为显示 locType 错误码")
+
+          old_cond = "if (result.locType != null && result.locType! > 0) {"
+          new_cond = (
+              "if (result.latitude != null &&\n"
+              "          result.longitude != null &&\n"
+              "          (result.locType == null || result.locType! > 0) &&\n"
+              "          (result.errorCode == null || result.errorCode == 0)) {"
+          )
+          if old_cond in src2:
+              src2 = src2.replace(old_cond, new_cond, 1)
+              print("baidu_map.dart: 成功判定已改为经纬度 + errorCode")
           else:
-              print("::warning::baidu_map.dart 中没找到目标字符串，跳过")
+              print("::warning::baidu_map.dart 未找到 locType 判定语句")
+
+          for old_msg in [
+              "_locationInfo = '定位失败，请重试';",
+              "_locationInfo = '定位失败(错误码 ${result.locType})，请重试';",
+          ]:
+              if old_msg in src2:
+                  src2 = src2.replace(
+                      old_msg,
+                      "_locationInfo = '定位失败(code=${result.errorCode}, info=${result.errorInfo})，请重试';",
+                      1,
+                  )
+                  print("baidu_map.dart: 失败提示已改为 errorCode / errorInfo")
+                  break
+
+          q.write_text(src2, encoding="utf-8")
           PYFILE
           python3 /tmp/patch_baidu.py
           echo "--- main.dart 前 45 行 ---"
