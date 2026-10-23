@@ -11,6 +11,7 @@ import '../utils/logger.dart';
 import '../push/easemob.dart';
 import '../push/update.dart';
 import 'widget/avatar.dart';
+import 'widget/ai_settings.dart';
 import 'login.dart';
 
 class AccountsPage extends StatefulWidget {
@@ -406,6 +407,22 @@ class _AccountsPageState extends State<AccountsPage> with TickerProviderStateMix
                       label: const Text('导出日志'),
                     ),
                   ],
+                ),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton.icon(
+                    onPressed: () async {
+                      Navigator.of(dialogContext).pop();
+                      final bool? saved = await showAiSettingsDialog(context);
+                      if (saved == true && mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('AI 接口配置已保存')),
+                        );
+                      }
+                    },
+                    icon: const Icon(Icons.smart_toy_outlined, size: 18),
+                    label: const Text('AI 接口设置'),
+                  ),
                 ),
                 const SizedBox(height: 4),
                 Align(
